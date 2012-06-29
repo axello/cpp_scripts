@@ -180,7 +180,8 @@ def process_file(f, filename):
         # print "Found test suite " + test 
     
     	# The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
-        filetest=False
+        # But falls back to less than half a second when indexing is turned on on the db
+        filetest=True
         # Read the file line by line and import it into the database
         for line in f:
           line = line.strip()
