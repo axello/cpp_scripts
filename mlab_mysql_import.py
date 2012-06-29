@@ -1,22 +1,23 @@
 #!/usr/bin/python
 #
-# Initials:		SF	Simon Funke
-#				RB	Ruben Bloemgarten
-#				AX	Axel Roest
+# Initials:     SF  Simon Funke
+#               RB  Ruben Bloemgarten
+#               AX  Axel Roest
 #
 # Version history
-# 2012xxxx		SF	first version
-# 20120628		AX	removed testing for every line, added timing code
+# 2012xxxx      SF  first version
+# 20120628      AX  removed testing for every line, added timing code, 
+# 20120629      AX  added loop over all arguments, exception handling, restructured code
 #
 # test: 
 # cd /DATA
 # python scripts/mlab/mlab_mysql_import2.py mlab/clean/glasnost/20090128T000000Z-batch-batch-glasnost-0002.tgz.csv
 # 
 # ToDO: loop over all arguments in sys.argv[0]
-#		deduplication toevoegen (put in hash, test on hash, clear hash for each file, but keep last entry
-#		move files naar done directory
-#		move error files naar error directory
-# 		
+#       deduplication toevoegen (put in hash, test on hash, clear hash for each file, but keep last entry
+#       move files naar done directory
+#       move error files naar error directory
+#       
 
 import sys
 import re
@@ -25,6 +26,13 @@ from optparse import OptionParser
 from datetime import datetime
 import dateutil.parser as dparser
 import MySQLdb
+import shutil
+
+#################################################################
+#                                                               #
+#           settings                                            #
+#                                                               #
+#################################################################
 
 # PLEASE UPDATE THESE SETTINGS
 db_host = "localhost" # your host, usually localhost
@@ -34,34 +42,30 @@ db_name = "mlab" # name of the database
 db_tables = {"glasnost": "glasnost", "ndt": "ndt"} # a mapping from testname to tablename
 db_filetable = 'files'
 
-# Read command line options
+# directories
+baseDir     = '/DATA/mlab/'
+scratchDir  = baseDir + 'scratch/'
+workDir     = baseDir + 'work/'
+archiveDir  = baseDir + 'archive/'
+errorDir    = baseDir + 'error/'
+logDir      = baseDir + 'logs/'
+cleanDir    = baseDir + 'clean/'
+
+#files
+errorLog    = "error.log"
+processLog  = "processed_files.log"
+
+#################################################################
+#                                                               #
+#           functions                                           #
+#                                                               #
+#################################################################
+
 def usage():
   print "Usage: mlab_mysql_import.py mlab_file.csv"
   print "Recursive import can be realised by running:"
   print "find . -iname '*.tgz.csv' -exec ./mlab_mysql_import.py {} \;"
   sys.exit(1)
-
-
-#################################################################
-#                                                               #
-#           start of initialisation                             #
-#                                                               #
-#################################################################
-
-parser = OptionParser()
-parser.add_option("-q", "--quiet", action="store_false", dest="verbose", default=False, help="don't print status messages to stdout")
-(options, args) = parser.parse_args()
-if len(args) == 0:
-  usage()
-
-# We might want to iterate over ALL filenames!
-filename = args[0]
-try:
-     f = open(filename, 'r')
-except IOError as e:
-     print 'Could not open file ', filename
-# Extract the basename of the filename, as the path is not of interest after this point
-filename = os.path.basename(filename)
 
 def extract_destination(filename):
   ''' This routine extracts the destination server of the mlab file. 
@@ -69,8 +73,8 @@ def extract_destination(filename):
   # Split the filename and perform some tests if it conforms to our standard
   f_split = filename.split('-')
   if len(f_split) < 3:
-    print "The specified filename (", filename, ") should contain at least two '-' characters that delimit the data, destination and the suffix."
-    sys.exit(1)
+    raise Exception("The specified filename (", filename, ") should contain at least two '-' characters that delimit the data, destination and the suffix.")
+    
   if '.tgz.csv' not in f_split[-1]:
     print "The specified filename (", filename, ") should end with '.tgz.csv'."
 
@@ -81,13 +85,11 @@ def extract_datetime(string):
   # Extract the date
   date_match = re.search(r'\d{4}/\d{2}/\d{2}', string)
   if not date_match:
-    print 'Error im import: line "', string, '" does not contain a valid date.'
-    sys.exit(1)
+    raise Exception('Error im import: line "', string, '" does not contain a valid date.')
   # Extract the time
   time_match = re.search(r'\d{2}:\d{2}:\d{2}', string)
   if not time_match:
-    print 'Error im import: line "', string, '" does not contain a valid time.'
-    sys.exit(1)
+    raise Exception('Error im import: line "', string, '" does not contain a valid time.')
 
   try:
     return dparser.parse(date_match.group(0) + ' ' + time_match.group(0), fuzzy=True) 
@@ -99,8 +101,7 @@ def extract_ip(string):
   # Extract the date
   match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', string)
   if not match:
-    print 'Error im import: line "', string, '" does not contain a valid ip address.'
-    sys.exit(1)
+    raise Exception ('Error im import: line "', string, '" does not contain a valid ip address.')
   return match.group(0)
 
 def exists_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
@@ -144,57 +145,135 @@ def get_file_id(cur, filename):
         return get_file_id(cur, filename)
     return id[0]
 
+# returns True on error, False on correct processing
+def process_file(f, filename):
+    start_time = datetime.now()
+    failure = True
+    try:
+        # Connect to the mysql database
+        db = MySQLdb.connect(host = db_host, 
+                             user = db_user, 
+                             passwd = db_passwd, 
+                             db = db_name) 
+        cur = db.cursor() 
+    
+        # Find the destination server by investigating the filename
+        destination = extract_destination(filename)
+        print 'Destination: ', destination,
+    
+        # Get the filename id from the files table
+        file_id = get_file_id(cur, filename) 
+        db.commit()
+    
+        # Find the testsuite by investigating the filename
+        try:
+            test = [test for test in db_tables.keys() if test in filename][0]
+        except IndexError:
+            sys.stderr.write('The filename ' + filename + ' does not contain a valid testname.')
+            return 1
+        # print "Found test suite " + test 
+    
+    	# The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
+        filetest=False
+        # Read the file line by line and import it into the database
+        for line in f:
+          line = line.strip()
+          source_ip = extract_ip(line)
+          test_datetime = extract_datetime(line)
+          if (filetest):
+            if (exists_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)):
+                # this file has already been read: ABORT WITH ERROR
+                raise Exception('File entry already exist in db; the file has already been read: ' + filename)
+            filetest=False
+          blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
+        end_time = datetime.now()
+        print 'File done in ' + str(end_time - start_time)
+        failure = False
+    except Exception as inst:
+        sys.stderr.write('Exception: '+str(inst.args)  + '\n')
+        with open(logDir + errorLog, 'a') as f:
+            f.write(pathname + '\n')
+            f.write('Exception: '+str(inst.args)  + '\n')
+        print
+    except IOError as e:
+        sys.stderr.write('Error handling file ' + filename + ' (' + str(e.args) + ')\n')
+        with open(logDir + errorLog, 'a') as f:
+            f.write(pathname + '\n')
+            f.write('Error handling file ' + filename + ' (' + str(e.args) + ')\n')
+        print
+#    except:
+#        sys.stderr.write('Process error ' + '\n')
+    finally:
+        # Commit and finish up
+        sys.stderr.flush()
+       # db.commit()
+        # disconnect from server
+        db.close()
+    
+    return failure
+    
+def extract_archive_date(filename):
+      m = re.match('^(\d{4})(\d{2})(\d{2})', filename)
+      return (m.group(1),m.group(2))
+
+# test if archive directory exist, and create it if necessary
+def create_archive_dir(ym):
+    if (not os.path.exists(ym)):
+        os.makedirs(ym)
+    return ym
+
+def move_archive(pathname):
+    fname = os.path.basename(pathname)
+    (year,month) = extract_archive_date(fname)
+    aDir = create_archive_dir(archiveDir + year +'/'+ month)
+    shutil.move(pathname,aDir)
+    with open(logDir + processLog, 'a') as f:
+        f.write(pathname + '\n')
+
+
+
+
+#################################################################
+#                                                               #
+#           start of initialisation                             #
+#           Read command line options                           #
+#                                                               #
+#################################################################
+
+parser = OptionParser()
+parser.add_option("-q", "--quiet", action="store_false", dest="verbose", default=False, help="don't print status messages to stdout")
+(options, args) = parser.parse_args()
+if len(args) == 0:
+  usage()
+
+# create file if necessary, as open by itself doesn't cut it
+f = open(logDir + processLog, 'a')
+f.write("\nNew batchjob on " + str(datetime.now()))
+f.close
+
+
 #################################################################
 #                                                               #
 #           start of main program                               #
 #                                                               #
 #################################################################
+global_start_time = datetime.now()
 
-start_time = datetime.now()
-# Connect to the mysql database
-db = MySQLdb.connect(host = db_host, 
-                     user = db_user, 
-                     passwd = db_passwd, 
-                     db = db_name) 
-cur = db.cursor() 
+# Iterate over ALL filenames
+for pathname in args:
+	try:
+		 with open(pathname, 'r') as f:
+        	# Extract the basename of the filename, as the path is not of interest after this point
+        	filename = os.path.basename(pathname)
+            print "processing file " + filename,
+        	if (process_file(f, filename)):
+    	        shutil.move(pathname,errorDir)
+        	else:
+        	    move_archive(pathname)
+        # file is automatically closed if needed
+    except IOError as e:
+         print 'Could not open file ' + pathname + '\nError: ' + str(e.args)
 
-# Find the destination server by investigating the filename
-destination = extract_destination(filename)
-print 'Found destination: ', destination
+global_end_time = datetime.now()
 
-# Get the filename id from the files table
-file_id = get_file_id(cur, filename) 
-db.commit()
-
-# Find the testsuite by investigating the filename
-try:
-    test = [test for test in db_tables.keys() if test in filename][0]
-except IndexError:
-    print 'The filename ' + filename + ' does not contain a valid testname.'
-    sys.exit(1)
-print "Found test suite " + test 
-
-# Read the file line by line and import it into the database
-filetest=True
-for line in f:
-  line = line.strip()
-  source_ip = extract_ip(line)
-  test_datetime = extract_datetime(line)
-  if (filetest):
-    if (exists_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)):
-        # this file has already been read: ABORT WITH ERROR
-        sys.stderr.write('The file has already been read: ' + filename)
-        sys.stderr.flush()
-        sys.exit('file entry already exist in db')
-    filetest=False
-  blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
-
-# Commit and finish up
-print 'Writing changes to database'
-db.commit()
-
-# disconnect from server
-db.close()
-end_time = datetime.now()
-
-print 'Done in ' + str(end_time - start_time)
+print '=====================================\nAll Done. ' + str(len(args)) + ' file(s) in ' + str(global_end_time - global_start_time)
