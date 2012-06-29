@@ -7,17 +7,17 @@
 # Version history
 # 2012xxxx      SF  first version
 # 20120628      AX  removed testing for every line, added timing code, 
-# 20120629      AX  added loop over all arguments, exception handling, restructured code
+# 20120629      AX  added loop over all arguments, exception handling, restructured code, moved processed files to archive or error folder
 #
 # test: 
 # cd /DATA
 # python scripts/mlab/mlab_mysql_import2.py mlab/clean/glasnost/20090128T000000Z-batch-batch-glasnost-0002.tgz.csv
 # 
-# ToDO: loop over all arguments in sys.argv[0]
-#       deduplication toevoegen (put in hash, test on hash, clear hash for each file, but keep last entry
-#       move files naar done directory
-#       move error files naar error directory
-#       
+# ToDO: v loop over all arguments in sys.argv[0]
+#       v deduplication toevoegen (put in hash, test on hash, clear hash for each file, but keep last entry
+#       v move files naar archive directory
+#       v move error files naar error directory
+#       v log process and errors
 
 import sys
 import re
@@ -62,9 +62,7 @@ processLog  = "processed_files.log"
 #################################################################
 
 def usage():
-  print "Usage: mlab_mysql_import.py mlab_file.csv"
-  print "Recursive import can be realised by running:"
-  print "find . -iname '*.tgz.csv' -exec ./mlab_mysql_import.py {} \;"
+  print "Usage: mlab_mysql_import3.py mlab_file1.csv [mlab_files.csv ...]"
   sys.exit(1)
 
 def extract_destination(filename):
@@ -145,6 +143,14 @@ def get_file_id(cur, filename):
         return get_file_id(cur, filename)
     return id[0]
 
+def dedup(file_id, table, test_datetime, destination, source_ip):
+    key = str(file_id) + table + str(test_datetime) + destination + source_ip
+    if key in deduplookup:
+        return False
+    else:
+        deduplookup[key] = True
+        return True
+        
 # returns True on error, False on correct processing
 def process_file(f, filename):
     start_time = datetime.now()
@@ -185,7 +191,9 @@ def process_file(f, filename):
                 # this file has already been read: ABORT WITH ERROR
                 raise Exception('File entry already exist in db; the file has already been read: ' + filename)
             filetest=False
-          blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
+          # test if we have already done it in this or last filetest
+          if (dedup(file_id, db_tables[test], test_datetime, destination, source_ip)):
+              blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
         end_time = datetime.now()
         print 'File done in ' + str(end_time - start_time)
         failure = False
@@ -231,8 +239,6 @@ def move_archive(pathname):
         f.write(pathname + '\n')
 
 
-
-
 #################################################################
 #                                                               #
 #           start of initialisation                             #
@@ -251,6 +257,11 @@ f = open(logDir + processLog, 'a')
 f.write("\nNew batchjob on " + str(datetime.now()))
 f.close
 
+# deduplookup is a hash we use for de-duplication of input lines
+# maybe it is necessary to purge parts of it during the duration of the import
+# but then we have to carefully monitor tests that appear in multiple files
+# OR store the last test in a separate global (dirty? yeah, I know)
+deduplookup = {}
 
 #################################################################
 #                                                               #
