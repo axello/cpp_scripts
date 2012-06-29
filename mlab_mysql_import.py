@@ -1,4 +1,23 @@
 #!/usr/bin/python
+#
+# Initials:		SF	Simon Funke
+#				RB	Ruben Bloemgarten
+#				AX	Axel Roest
+#
+# Version history
+# 2012xxxx		SF	first version
+# 20120628		AX	removed testing for every line, added timing code
+#
+# test: 
+# cd /DATA
+# python scripts/mlab/mlab_mysql_import2.py mlab/clean/glasnost/20090128T000000Z-batch-batch-glasnost-0002.tgz.csv
+# 
+# ToDO: loop over all arguments in sys.argv[0]
+#		deduplication toevoegen (put in hash, test on hash, clear hash for each file, but keep last entry
+#		move files naar done directory
+#		move error files naar error directory
+# 		
+
 import sys
 import re
 import os
@@ -22,12 +41,20 @@ def usage():
   print "find . -iname '*.tgz.csv' -exec ./mlab_mysql_import.py {} \;"
   sys.exit(1)
 
+
+#################################################################
+#                                                               #
+#           start of initialisation                             #
+#                                                               #
+#################################################################
+
 parser = OptionParser()
 parser.add_option("-q", "--quiet", action="store_false", dest="verbose", default=False, help="don't print status messages to stdout")
 (options, args) = parser.parse_args()
 if len(args) == 0:
   usage()
 
+# We might want to iterate over ALL filenames!
 filename = args[0]
 try:
      f = open(filename, 'r')
@@ -76,8 +103,26 @@ def extract_ip(string):
     sys.exit(1)
   return match.group(0)
 
+def exists_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
+    ''' Test if the entry already exists in the database '''
+    # Check if the entry exists already 
+    sql = "SELECT COUNT(*) FROM " + db_table + " WHERE date = '" + test_datetime.isoformat() + "' AND destination = '" + destination +  "' AND  source = '" + source_ip + "' AND file_id = " + str(file_id) 
+    cur.execute(sql)
+
+    if cur.fetchone()[0] < 1:
+        return False
+    else:
+        return True
+
+def blunt_insert_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
+    ''' Insert a connection to the database without testing '''
+    columns = ', '.join(['date', 'destination', 'source', 'file_id'])
+    values = '"' + '", "'.join([test_datetime.isoformat(), destination, source_ip, str(file_id)]) + '"'
+    sql = "INSERT INTO  " + db_table + " (" + columns + ") VALUES(" + values + ") "
+    cur.execute(sql)
+
 def insert_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
-    ''' Insert a test connection to the database if it not already exists '''
+    ''' Insert a test connection to the database, if it not already exists '''
     # Check if the entry exists already 
     sql = "SELECT COUNT(*) FROM " + db_table + " WHERE date = '" + test_datetime.isoformat() + "' AND destination = '" + destination +  "' AND  source = '" + source_ip + "' AND file_id = " + str(file_id) 
     cur.execute(sql)
@@ -85,11 +130,7 @@ def insert_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip
     # If not, then isert it
     if cur.fetchone()[0] < 1:
         print 'Found new test performed on the', test_datetime, 'from ' + destination + ' -> ' + source_ip + '.' 
-
-        columns = ', '.join(['date', 'destination', 'source', 'file_id'])
-        values = '"' + '", "'.join([test_datetime.isoformat(), destination, source_ip, str(file_id)]) + '"'
-        sql = "INSERT INTO  " + db_table + " (" + columns + ") VALUES(" + values + ") "
-        cur.execute(sql)
+        blunt_insert_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip)
 
 def get_file_id(cur, filename):
     ''' Returns the id of a filename in the filename table. Creates a new row if the filename does not exist. ''' 
@@ -103,6 +144,13 @@ def get_file_id(cur, filename):
         return get_file_id(cur, filename)
     return id[0]
 
+#################################################################
+#                                                               #
+#           start of main program                               #
+#                                                               #
+#################################################################
+
+start_time = datetime.now()
 # Connect to the mysql database
 db = MySQLdb.connect(host = db_host, 
                      user = db_user, 
@@ -127,11 +175,19 @@ except IndexError:
 print "Found test suite " + test 
 
 # Read the file line by line and import it into the database
+filetest=True
 for line in f:
   line = line.strip()
   source_ip = extract_ip(line)
   test_datetime = extract_datetime(line)
-  insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
+  if (filetest):
+    if (exists_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)):
+        # this file has already been read: ABORT WITH ERROR
+        sys.stderr.write('The file has already been read: ' + filename)
+        sys.stderr.flush()
+        sys.exit('file entry already exist in db')
+    filetest=False
+  blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
 
 # Commit and finish up
 print 'Writing changes to database'
@@ -139,4 +195,6 @@ db.commit()
 
 # disconnect from server
 db.close()
-print 'Done'
+end_time = datetime.now()
+
+print 'Done in ' + str(end_time - start_time)
