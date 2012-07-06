@@ -7,8 +7,8 @@
 #               AX  Axel Roest
 #
 # Version history
-# 20120629		AX	first version
-# 20120701      AX  cleanup of unused methods, Ruben fixed the locID bug
+# 20120629      AX  first version
+# 20120701      AX  cleanup of unused methods, Ruben fixed the locID bug, iterate over all maxmind tables if no argument given, fixed sql update query
 #
 # test: 
 # cd /DATA
@@ -19,7 +19,7 @@
 #       v move files naar archive directory
 #       v move error files naar error directory
 #       v log process and errors
-#		todo: loop through all maxmind tables and update full mlab set
+#       todo: loop through all maxmind tables and update full mlab set
 
 import sys
 import re
@@ -89,6 +89,7 @@ def check_maxmind_exist(cur, table):
     else:
         return True
 
+# return a list of Blocks_GeoLiteCity_ tables, for looking up the locIds
 def get_maxmind_tableset(cur):
     sql = "SHOW TABLES FROM `maxmind`"
     cur.execute(sql)
@@ -99,13 +100,11 @@ def get_maxmind_tableset(cur):
         m = re.search('Blocks_GeoLiteCity_(\d+)$', item[0])
         if (m):
             rows.append(m.group(0))
-    print rows
     return rows
 
-def get_maxmind_dates(cur):
+def get_maxmind_dates(rows):
     datehash = {}
-    rows = get_maxmind_tableset(cur)
-    
+    # we skip storing the first entry, as we need the date of the second entry first to store the range
     skipfirst = True
     for table in rows:
         date = extract_datestring(table)
@@ -114,6 +113,7 @@ def get_maxmind_dates(cur):
         else:
             datehash[olddate] = date
         olddate = date
+    # the skipping is set straight by storing the last entry outside of the loop
     # last one is 6 months in the future
     lastdate = extract_date(date)
     print 'date=' + date + " = " + str(lastdate)
@@ -127,7 +127,7 @@ def update_mlab_glasnost(cur,table):
     end_datum   = maxmind_dates[start_datum]
     print 'updating between' + start_datum + ' AND ' + end_datum
     try:
-        sql = 'UPDATE mlab.glasnost SET locId = M.`locId` FROM mlab.glasnost L , maxmind.' + table + ' M WHERE  L.`source` BETWEEN M.`startnumip` AND M.`endnumip` AND L.`date` BETWEEN "' + start_datum + '" AND "' + end_datum + '" AND L.`locId` = 0'
+	    sql = 'UPDATE mlab.glasnost L, maxmind.' + table + ' M SET L.locId = M.locId  WHERE  L.longip BETWEEN M.startIpNum AND M.endIpNum AND L.date BETWEEN "' + start_datum + '" AND "' + end_datum + '" AND L.locId = 0'
         print sql
         cur.execute(sql)
     except MySQLdb.Error, e:
@@ -143,8 +143,7 @@ def update_mlab_glasnost(cur,table):
 parser = OptionParser()
 parser.add_option("-q", "--quiet", action="store_false", dest="verbose", default=False, help="don't print status messages to stdout")
 (options, args) = parser.parse_args()
-if len(args) == 0:
-  usage()
+# check for -h argument here
 
 # create file if necessary, as open by itself doesn't cut it
 f = open(logDir + processLog, 'a')
@@ -169,16 +168,22 @@ try:
 except:
     sys.stderr.write('Error, cannot connect to database' + db_name + '\n')
 
-# contains hash with key = start_date, value = enddate (= startdate of next table, except for the last one)
-# maxmind_all_tables = get_maxmind_tableset(cur)
-maxmind_dates = get_maxmind_dates(cur)
-print maxmind_dates
+# array with tables to loop over, in case we don't get a table argument
+maxmind_all_tables = get_maxmind_tableset(cur)
 
-# sys.exit(1)
-# Iterate over ALL filenames
-for table in args:
-    if (check_maxmind_exist(cur,table)):
-        update_mlab_glasnost(cur,table)
+# contains hash with key = start_date, value = enddate (= startdate of next table, except for the last one)
+maxmind_dates = get_maxmind_dates(maxmind_all_tables)
+
+if len(args) == 0:
+    print "Iterating over ALL maxmind tables"
+    for table in maxmind_all_tables:
+        if (check_maxmind_exist(cur,table)):
+            update_mlab_glasnost(cur,table)
+else:
+    print "Iterating over all arguments"
+    for table in args:
+        if (check_maxmind_exist(cur,table)):
+            update_mlab_glasnost(cur,table)
 
 cur.close()
 global_end_time = datetime.now()
