@@ -8,6 +8,7 @@
 # 2012xxxx      SF  first version
 # 20120628      AX  removed testing for every line, added timing code, 
 # 20120629      AX  added loop over all arguments, exception handling, restructured code, moved processed files to archive or error folder
+# 20120708      AX  skip empty ip lines instead or error message
 #
 # test: 
 # cd /DATA
@@ -18,6 +19,7 @@
 #       v move files naar archive directory
 #       v move error files naar error directory
 #       v log process and errors
+#       v skip empty ip lines instead or error message
 
 import sys
 import re
@@ -94,12 +96,17 @@ def extract_datetime(string):
   except ValueError:
     raise ValueError, 'Error im import: line "' + string + '" does not contain a valid date and time.'
 
+# return with empty string when we encounter cputime, or no ip number
 def extract_ip(string):
+  if re.search('cputime', string):
+    return ''
   ''' Returns the first valid ip address contained in string '''
   # Extract the date
   match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', string)
   if not match:
-    raise Exception ('Error im import: line "', string, '" does not contain a valid ip address.')
+    # ignore file
+    return ''
+    # raise Exception ('Error im import: line "', string, '" does not contain a valid ip address.')
   return match.group(0)
 
 def exists_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
@@ -186,6 +193,8 @@ def process_file(f, filename):
         for line in f:
           line = line.strip()
           source_ip = extract_ip(line)
+          if ('' == source_ip):
+            continue                    # skip empty lines instead of error reporting them
           test_datetime = extract_datetime(line)
           if (filetest):
             if (exists_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)):
