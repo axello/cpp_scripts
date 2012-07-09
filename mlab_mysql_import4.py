@@ -21,15 +21,6 @@
 #       v move error files naar error directory
 #       v log process and errors
 #       v skip empty ip lines instead or error message
-#
-#       Get the date from the filename, and look up the correct maxmind database
-#       then, insert the locId directly with the line in the mlab/{glasnost,ndt} database, preventing slow future updates
-#       on the other hand, all these updates might be extremely slow: TEST
-#
-#		todo : refactor all the utility functions in a separate file
-#		todo : refactor all the passwords in a separate file (which is NOT in the repo, AND is in the .gitignore list
-
-
 
 import sys
 import re
@@ -51,11 +42,12 @@ db_host = "localhost" # your host, usually localhost
 db_user = "root" # your username
 db_passwd = "" # your password
 db_name = "mlab" # name of the database
-db_tables = {"glasnost": "glasnost", "ndt": "ndt"} # a mapping from testname to tablename
+db_tables = {"glasnost": "glasnost", "ndt": "ndt_test"} # a mapping from testname to tablename
 db_filetable = 'files'
 
 # directories
 baseDir     = '/DATA/mlab/'
+#baseDir     = '/home/axel/mlab/'
 scratchDir  = baseDir + 'scratch/'
 workDir     = baseDir + 'work/'
 archiveDir  = baseDir + 'archive/'
@@ -76,7 +68,7 @@ processLog  = "mlab_mysql_import_processed_files.log"
 def usage():
   print "Usage: mlab_mysql_import3.py mlab_file1.csv [mlab_files.csv ...]"
   sys.exit(1)
-
+  
 # This routine extracts the destination server of the mlab file. 
 # It assumes that the filename has the form like 20100210T000000Z-mlab3-dfw01-ndt-0000.tgz.csv
 #  
@@ -198,7 +190,7 @@ def process_file(f, filename):
             return 1
         # print "Found test suite " + test 
     
-    	# The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
+        # The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
         # But falls back to less than half a second when indexing is turned on on the db
         filetest=True
         # Read the file line by line and import it into the database
@@ -238,11 +230,11 @@ def process_file(f, filename):
         # Commit and finish up
         sys.stderr.flush()
        # db.commit()
-        # disconnect from server
+       # disconnect from server
         db.close()
     
     return failure
-    
+
 # get the test date from the archive filename
 def extract_archive_date(filename):
       m = re.match('^(\d{4})(\d{2})(\d{2})', filename)
@@ -297,16 +289,16 @@ global_start_time = datetime.now()
 
 # Iterate over ALL filenames
 for pathname in args:
-	try:
-		 with open(pathname, 'r') as f:
-        	# Extract the basename of the filename, as the path is not of interest after this point
-        	filename = os.path.basename(pathname)
+    try:
+        with open(pathname, 'r') as f:
+            # Extract the basename of the filename, as the path is not of interest after this point
+            filename = os.path.basename(pathname)
             print "processing file " + filename,
-        	if (process_file(f, filename)):
-    	        shutil.move(pathname,errorDir)
-        	else:
-        	    move_archive(pathname)
-        # file is automatically closed if needed
+            if (process_file(f, filename)):
+                shutil.move(pathname,errorDir)
+            else:
+                move_archive(pathname)
+    # file is automatically closed if needed
     except IOError as e:
          print 'Could not open file ' + pathname + '\nError: ' + str(e.args)
 
