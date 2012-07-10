@@ -10,6 +10,7 @@
 # 20120629      AX  added loop over all arguments, exception handling, restructured code, moved processed files to archive or error folder
 # 20120708      AX  skip empty ip lines instead or error message
 # 20120708      RB  cleaning some names and spelling, also we don't want processed_files.log to clobber the downloaders processed_files.log. So we should use overly descriptive names
+# 20120710      AX  added locId lookup and added longip to insert query
 #
 # test: 
 # cd /DATA
@@ -21,15 +22,14 @@
 #       v move error files naar error directory
 #       v log process and errors
 #       v skip empty ip lines instead or error message
+#       v added locId lookup and added longip to insert query
 #
 #       Get the date from the filename, and look up the correct maxmind database
 #       then, insert the locId directly with the line in the mlab/{glasnost,ndt} database, preventing slow future updates
 #       on the other hand, all these updates might be extremely slow: TEST
 #
-#		todo : refactor all the utility functions in a separate file
-#		todo : refactor all the passwords in a separate file (which is NOT in the repo, AND is in the .gitignore list
-
-
+#       todo : refactor all the utility functions in a separate file
+#       todo : refactor all the passwords in a separate file (which is NOT in the repo, AND is in the .gitignore list
 
 import sys
 import re
@@ -39,6 +39,8 @@ from datetime import datetime
 import dateutil.parser as dparser
 import MySQLdb
 import shutil
+from maxmind import MaxMind
+import socket, struct
 
 #################################################################
 #                                                               #
@@ -51,11 +53,12 @@ db_host = "localhost" # your host, usually localhost
 db_user = "root" # your username
 db_passwd = "" # your password
 db_name = "mlab" # name of the database
-db_tables = {"glasnost": "glasnost", "ndt": "ndt"} # a mapping from testname to tablename
+db_tables = {"glasnost": "glasnost", "ndt": "ndt_test"} # a mapping from testname to tablename
 db_filetable = 'files'
 
 # directories
 baseDir     = '/DATA/mlab/'
+#baseDir     = '/home/axel/mlab/'
 scratchDir  = baseDir + 'scratch/'
 workDir     = baseDir + 'work/'
 archiveDir  = baseDir + 'archive/'
@@ -67,14 +70,26 @@ cleanDir    = baseDir + 'clean/'
 errorLog    = "mlab_mysql_import_error.log"
 processLog  = "mlab_mysql_import_processed_files.log"
 
+# default tables
+maxmind_table = 'Blocks_GeoLiteCity_Last'
+ndt_import    = 'ndt_import'
 #################################################################
 #                                                               #
 #           functions                                           #
 #                                                               #
 #################################################################
 
+# Convert an IP string to long
+def ip2long(ip):
+  packedIP = socket.inet_aton(ip)
+  return struct.unpack("!L", packedIP)[0]
+
+def long2ip(l):
+  return socket.inet_ntoa(struct.pack('!L', l))
+
 def usage():
-  print "Usage: mlab_mysql_import3.py mlab_file1.csv [mlab_files.csv ...]"
+  print "Usage: mlab_mysql_import.py [ -m maxmind_Blocks_Tablename ] mlab_file1.csv [mlab_files.csv ...]"
+  print "Default: maxmind_Blocks_Tablename = `Blocks_GeoLiteCity_Last`"
   sys.exit(1)
 
 # This routine extracts the destination server of the mlab file. 
@@ -133,9 +148,13 @@ def exists_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip
 
 # Insert a connection to the database without testing.
 def blunt_insert_dbentry(cur, file_id, db_table, test_datetime, destination, source_ip):
-    columns = ', '.join(['date', 'destination', 'source', 'file_id'])
-    values = '"' + '", "'.join([test_datetime.isoformat(), destination, source_ip, str(file_id)]) + '"'
+    longip = ip2long(source_ip)
+    # locid = 0
+    locid = mm.lookup(longip)                  # lookup location id from ip number
+    columns = ', '.join(['date', 'destination', 'source', 'file_id', 'longip', 'locId'])
+    values = '"' + '", "'.join([test_datetime.isoformat(), destination, source_ip, str(file_id), str(longip), str(locid)]) + '"'
     sql = "INSERT INTO  " + db_table + " (" + columns + ") VALUES(" + values + ") "
+    # print sql
     cur.execute(sql)
 
 # Insert a test connection to the database, if it not already exists
@@ -170,6 +189,26 @@ def dedup(file_id, table, test_datetime, destination, source_ip):
         deduplookup[key] = True
         return True
         
+# for the temp table, look up all the locations with the locId
+def lookup_locations(cur, destination):
+    location_table_name = maxmind_table.replace("Blocks", "Location")
+    # sql = 'UPDATE mlab.`' + destination + '` L, maxmind.`' + location_table_name + '` M SET L.country_code = M.country, L.region=M.region, L.city=M.city, L.postalCode=M.postalCode, L.latitude=M.latitude, L.longitude=M.longitude, L.metroCode=M.metroCode, L.areaCode=M.areaCode WHERE L.`locId` = M.`locId`'
+    sql = 'UPDATE mlab.`ndt_import` L, maxmind.`' + location_table_name + '` M SET L.country_code = M.country, L.region=M.region, L.city=M.city, L.postalCode=M.postalCode, L.latitude=M.latitude, L.longitude=M.longitude, L.metroCode=M.metroCode, L.areaCode=M.areaCode WHERE L.`locId` = M.`locId`'
+    updated = cur.execute(sql)
+    # update country from country_code later?
+    return updated
+
+# clear the temp table
+def clear_temp_table(cur):
+    sql = 'truncate table `' + ndt_import + '`'
+    cur.execute(sql)
+    
+# move the temp table to the real on (either ndt_test or ndt)
+def move_temp_table(cur, destination):
+    sql = 'INSERT INTO `' + destination + '` (`created_at`, `date`, `destination`, `source`, `file_id`, `country_code`, `longip`, `locId`, `country`, `region`, `city`, `postalCode`, `latitude`, `longitude`, `metroCode`, `areaCode`)  SELECT * FROM `' + ndt_import + '`'
+    updated = cur.execute(sql)
+    return updated
+    
 # returns True on error, False on correct processing
 def process_file(f, filename):
     start_time = datetime.now()
@@ -181,6 +220,7 @@ def process_file(f, filename):
                              passwd = db_passwd, 
                              db = db_name) 
         cur = db.cursor() 
+        clear_temp_table(cur)
     
         # Find the destination server by investigating the filename
         destination = extract_destination(filename)
@@ -190,7 +230,7 @@ def process_file(f, filename):
         file_id = get_file_id(cur, filename) 
         db.commit()
     
-        # Find the testsuite by investigating the filename
+        # Find the testsuite (glasnost or ndt) by investigating the filename
         try:
             test = [test for test in db_tables.keys() if test in filename][0]
         except IndexError:
@@ -198,7 +238,7 @@ def process_file(f, filename):
             return 1
         # print "Found test suite " + test 
     
-    	# The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
+        # The filetest ALONE, takes 3 seconds with a 9 million records database, without indexes
         # But falls back to less than half a second when indexing is turned on on the db
         filetest=True
         # Read the file line by line and import it into the database
@@ -215,9 +255,12 @@ def process_file(f, filename):
             filetest=False
           # test if we have already done it in this or last filetest
           if (dedup(file_id, db_tables[test], test_datetime, destination, source_ip)):
-              blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
+              # blunt_insert_dbentry(cur, file_id, db_tables[test], test_datetime, destination, source_ip)
+              blunt_insert_dbentry(cur, file_id, ndt_import, test_datetime, destination, source_ip)
         end_time = datetime.now()
         print 'File done in ' + str(end_time - start_time)
+        lookup_locations(cur, destination)
+        move_temp_table(cur, db_tables[test])
         failure = False
     except Exception as inst:
         sys.stderr.write('Exception: '+str(inst.args)  + '\n')
@@ -231,9 +274,6 @@ def process_file(f, filename):
             f.write(pathname + '\n')
             f.write('Error handling file ' + filename + ' (' + str(e.args) + ')\n')
         print
-# This bit should probably be cleaned up.        
-#    except:
-#        sys.stderr.write('Process error ' + '\n')
     finally:
         # Commit and finish up
         sys.stderr.flush()
@@ -273,7 +313,11 @@ def move_archive(pathname):
 
 parser = OptionParser()
 parser.add_option("-q", "--quiet", action="store_false", dest="verbose", default=False, help="don't print status messages to stdout")
+parser.add_option("-m", "--maxmind", dest="maxmind_table", default='', help="optional maxmind_table, if omitted we use 'Last'")
 (options, args) = parser.parse_args()
+if options.maxmind_table != '':
+    maxmind_table = options.maxmind_table
+    
 if len(args) == 0:
   usage()
 
@@ -295,17 +339,26 @@ deduplookup = {}
 #################################################################
 global_start_time = datetime.now()
 
+# get instance of maxmind table
+print "using " + maxmind_table
+
+mm = MaxMind(db_host, db_user, db_passwd, "maxmind",maxmind_table)
+
+if not mm:
+    sys.stderr.write('maxmind table does not exist: ' + maxmind_table + ' (' + str(e.args) + ')\n')
+    exit(1)
+
 # Iterate over ALL filenames
 for pathname in args:
-	try:
-		 with open(pathname, 'r') as f:
-        	# Extract the basename of the filename, as the path is not of interest after this point
-        	filename = os.path.basename(pathname)
+    try:
+         with open(pathname, 'r') as f:
+            # Extract the basename of the filename, as the path is not of interest after this point
+            filename = os.path.basename(pathname)
             print "processing file " + filename,
-        	if (process_file(f, filename)):
-    	        shutil.move(pathname,errorDir)
-        	else:
-        	    move_archive(pathname)
+            if (process_file(f, filename)):
+                shutil.move(pathname,errorDir)
+            else:
+                move_archive(pathname)
         # file is automatically closed if needed
     except IOError as e:
          print 'Could not open file ' + pathname + '\nError: ' + str(e.args)
